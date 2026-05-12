@@ -136,13 +136,15 @@ prompt_new_session() {
     fi
 }
 
-tput sc
+# render() prints: 3 (header block) + count (sessions) + 1 (blank) + 1 (new session) + 2 (hint block) = count+7 lines
+MENU_LINES=$((count + 7))
+
 render
 
 while true; do
     key=$(read_key)
-    tput rc
-    tput ed
+    printf '\033[%dA' "$MENU_LINES"  # cursor up N lines
+    printf '\033[J'                   # clear to end of screen
 
     case "$key" in
         $'\x1b[A'|k)  # Up / vim-up
