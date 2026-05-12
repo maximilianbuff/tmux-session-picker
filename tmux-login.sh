@@ -86,44 +86,90 @@ if [[ -n "$TARGET" ]]; then
 fi
 
 # ── Interactive picker ────────────────────────────────────────────────────────
-echo -e "\n${BLD}${CYN}  Active tmux sessions${RST}\n"
+mapfile -t NAMES < <(echo "$SESSIONS" | cut -d'|' -f1)
+mapfile -t WINS  < <(echo "$SESSIONS" | cut -d'|' -f2)
+mapfile -t ATTS  < <(echo "$SESSIONS" | cut -d'|' -f3)
 
-i=1
-declare -a NAMES
-while IFS='|' read -r name wins att; do
-    NAMES+=("$name")
-    [[ "$att" -gt 0 ]] && dot="${GRN}●${RST} " || dot="${DIM}○${RST} "
-    printf "  ${BLD}%2d)${RST}  %b%-22s ${DIM}%d window%s${RST}\n" \
-        "$i" "$dot" "$name" "$wins" "$( [[ "$wins" -ne 1 ]] && echo s )"
-    ((i++))
-done <<< "$SESSIONS"
+count=${#NAMES[@]}
+sel=0  # 0..count-1 = session, count = "New session"
 
-echo -e "   ${BLD}n)${RST}  New session\n"
+render() {
+    echo -e "\n${BLD}${CYN}  Active tmux sessions${RST}\n"
+    for ((i=0; i<count; i++)); do
+        local wins="${WINS[$i]}"
+        local suffix; [[ "$wins" -ne 1 ]] && suffix="s" || suffix=""
+        local dot; [[ "${ATTS[$i]}" -gt 0 ]] && dot="${GRN}●${RST}" || dot="${DIM}○${RST}"
+        if [[ $i -eq $sel ]]; then
+            printf "  ${CYN}${BLD}▶${RST}  %b ${BLD}%-22s${RST} ${DIM}%d window%s${RST}\n" \
+                "$dot" "${NAMES[$i]}" "$wins" "$suffix"
+        else
+            printf "     %b %-22s ${DIM}%d window%s${RST}\n" \
+                "$dot" "${NAMES[$i]}" "$wins" "$suffix"
+        fi
+    done
+    echo ""
+    if [[ $sel -eq $count ]]; then
+        echo -e "  ${CYN}${BLD}▶  New session${RST}"
+    else
+        echo -e "     ${DIM}New session${RST}"
+    fi
+    echo -e "\n  ${DIM}↑↓ navigate · Enter select · n new · q quit${RST}"
+}
+
+read_key() {
+    local key seq
+    IFS= read -rsn1 key
+    if [[ "$key" == $'\x1b' ]]; then
+        IFS= read -rsn2 -t 0.05 seq
+        key+="$seq"
+    fi
+    printf '%s' "$key"
+}
+
+prompt_new_session() {
+    echo ""
+    read -rp "$(echo -e "${BLD}Session name (blank = default): ${RST}")" name
+    if [[ -n "$name" ]]; then
+        exec tmux new-session -s "$name" || die "new-session failed for '$name'"
+    else
+        exec tmux new-session || die "new-session failed"
+    fi
+}
+
+tput sc
+render
 
 while true; do
-    read -rp "$(echo -e "${BLD}› ${RST}")" choice
-    case "$choice" in
-        n|N)
-            read -rp "$(echo -e "${BLD}Session name (blank = default): ${RST}")" name
-            if [[ -n "$name" ]]; then
-                exec tmux new-session -s "$name" || die "new-session failed for '$name'"
+    key=$(read_key)
+    tput rc
+    tput ed
+
+    case "$key" in
+        $'\x1b[A'|k)  # Up / vim-up
+            sel=$(( (sel - 1 + count + 1) % (count + 1) ))
+            ;;
+        $'\x1b[B'|j)  # Down / vim-down
+            sel=$(( (sel + 1) % (count + 1) ))
+            ;;
+        ''|$'\n'|$'\r')  # Enter
+            if [[ $sel -eq $count ]]; then
+                prompt_new_session
             else
-                exec tmux new-session || die "new-session failed"
+                exec tmux attach-session -t "=${NAMES[$sel]}" || die "attach-session failed"
             fi
             ;;
-        "")
-            continue
+        n|N)  prompt_new_session ;;
+        q|Q)
+            echo -e "${DIM}Cancelled.${RST}"
+            exec bash --login
             ;;
-        [0-9]*)
-            name="${NAMES[$((choice - 1))]}"
-            if [[ -n "$name" ]]; then
-                exec tmux attach-session -t "=$name" || die "attach-session failed for '$name'"
-            else
-                echo -e "${RED}  No session #${choice} — try again${RST}"
+        [1-9])
+            idx=$((key - 1))
+            if [[ $idx -lt $count ]]; then
+                exec tmux attach-session -t "=${NAMES[$idx]}" || die "attach-session failed"
             fi
-            ;;
-        *)
-            attach_or_create "$choice"
             ;;
     esac
+
+    render
 done
