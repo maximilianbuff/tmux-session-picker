@@ -91,7 +91,8 @@ mapfile -t WINS  < <(echo "$SESSIONS" | cut -d'|' -f2)
 mapfile -t ATTS  < <(echo "$SESSIONS" | cut -d'|' -f3)
 
 count=${#NAMES[@]}
-sel=0  # 0..count-1 = session, count = "New session"
+sel=0    # 0..count-1 = session, count = "New session"
+typed="" # text input buffer for direct session name creation
 
 render() {
     echo -e "\n${BLD}${CYN}  Active tmux sessions${RST}\n"
@@ -99,7 +100,7 @@ render() {
         local wins="${WINS[$i]}"
         local suffix; [[ "$wins" -ne 1 ]] && suffix="s" || suffix=""
         local dot; [[ "${ATTS[$i]}" -gt 0 ]] && dot="${GRN}●${RST}" || dot="${DIM}○${RST}"
-        if [[ $i -eq $sel ]]; then
+        if [[ $i -eq $sel && -z "$typed" ]]; then
             printf "  ${CYN}${BLD}▶${RST}  %b ${BLD}%-22s${RST} ${DIM}%d window%s${RST}\n" \
                 "$dot" "${NAMES[$i]}" "$wins" "$suffix"
         else
@@ -108,12 +109,17 @@ render() {
         fi
     done
     echo ""
-    if [[ $sel -eq $count ]]; then
+    if [[ $sel -eq $count && -z "$typed" ]]; then
         echo -e "  ${CYN}${BLD}▶  New session${RST}"
     else
         echo -e "     ${DIM}New session${RST}"
     fi
-    echo -e "\n  ${DIM}↑↓ navigate · Enter select · n new · q quit${RST}"
+    # input line — always 2 lines (blank + content) to keep MENU_LINES constant
+    if [[ -n "$typed" ]]; then
+        printf "\n  ${BLD}›${RST} %s${BLD}_${RST}\n" "$typed"
+    else
+        echo -e "\n  ${DIM}↑↓ navigate · Enter select · type to create · q quit${RST}"
+    fi
 }
 
 read_key() {
@@ -136,39 +142,66 @@ prompt_new_session() {
     fi
 }
 
-# render() prints: 3 (header block) + count (sessions) + 1 (blank) + 1 (new session) + 2 (hint block) = count+7 lines
+# render() prints: 3 (header block) + count (sessions) + 1 (blank) + 1 (new session) + 2 (input/hint block) = count+7 lines
 MENU_LINES=$((count + 7))
 
 render
 
 while true; do
     key=$(read_key)
-    printf '\033[%dA' "$MENU_LINES"  # cursor up N lines
-    printf '\033[J'                   # clear to end of screen
+    printf '\033[%dA' "$MENU_LINES"
+    printf '\033[J'
 
     case "$key" in
-        $'\x1b[A'|k)  # Up / vim-up
+        $'\x1b[A')  # Up arrow — navigate, clear buffer
+            typed=""
             sel=$(( (sel - 1 + count + 1) % (count + 1) ))
             ;;
-        $'\x1b[B'|j)  # Down / vim-down
+        $'\x1b[B')  # Down arrow — navigate, clear buffer
+            typed=""
             sel=$(( (sel + 1) % (count + 1) ))
             ;;
         ''|$'\n'|$'\r')  # Enter
-            if [[ $sel -eq $count ]]; then
+            if [[ -n "$typed" ]]; then
+                exec tmux new-session -s "$typed" || die "new-session failed for '$typed'"
+            elif [[ $sel -eq $count ]]; then
                 prompt_new_session
             else
                 exec tmux attach-session -t "=${NAMES[$sel]}" || die "attach-session failed"
             fi
             ;;
-        n|N)  prompt_new_session ;;
-        q|Q)
-            echo -e "${DIM}Cancelled.${RST}"
-            exec bash --login
+        $'\x7f'|$'\x08')  # Backspace
+            typed="${typed%?}"
             ;;
-        [1-9])
-            idx=$((key - 1))
-            if [[ $idx -lt $count ]]; then
-                exec tmux attach-session -t "=${NAMES[$idx]}" || die "attach-session failed"
+        $'\x1b')  # ESC — clear buffer, or quit if already empty
+            if [[ -n "$typed" ]]; then
+                typed=""
+            else
+                echo -e "${DIM}Cancelled.${RST}"
+                exec bash --login
+            fi
+            ;;
+        *)
+            if [[ -z "$typed" ]]; then
+                # Shortcuts only active when not typing
+                case "$key" in
+                    k)  sel=$(( (sel - 1 + count + 1) % (count + 1) )) ;;
+                    j)  sel=$(( (sel + 1) % (count + 1) )) ;;
+                    n|N)  prompt_new_session ;;
+                    q|Q)
+                        echo -e "${DIM}Cancelled.${RST}"
+                        exec bash --login
+                        ;;
+                    [1-9])
+                        idx=$((key - 1))
+                        if [[ $idx -lt $count ]]; then
+                            exec tmux attach-session -t "=${NAMES[$idx]}" || die "attach-session failed"
+                        fi
+                        ;;
+                    [[:print:]])  typed+="$key" ;;
+                esac
+            else
+                [[ "$key" =~ [[:print:]] ]] && typed+="$key"
             fi
             ;;
     esac
